@@ -92,7 +92,8 @@ def evaluate_and_save_video(label: str, model_path: Path, vecnorm_path: Path | N
 def train_chunk(chunk_idx: int, slope_deg: float,
                 resume_model_path: Path | None, vecnorm_path: Path | None,
                 n_envs: int = N_ENVS, stairs: bool = False,
-                terrain_vision: bool = False) -> tuple[Path, Path]:
+                terrain_vision: bool = False, lr: float = 3e-4,
+                clip_range: float = 0.2) -> tuple[Path, Path]:
     if terrain_vision:
         label = "vision_flat"
     elif stairs:
@@ -148,19 +149,21 @@ def train_chunk(chunk_idx: int, slope_deg: float,
             str(resume_model_path),
             env=train_env,
             tensorboard_log=str(LOGS_DIR / label),
+            learning_rate=lr,
+            clip_range=clip_range,
         )
     else:
         # ゼロから学習
         model = PPO(
             policy="MlpPolicy",
             env=train_env,
-            learning_rate=3e-4,
+            learning_rate=lr,
             n_steps=2048,
             batch_size=64,
             n_epochs=10,
             gamma=0.99,
             gae_lambda=0.95,
-            clip_range=0.2,
+            clip_range=clip_range,
             ent_coef=0.005,
             policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])),
             verbose=1,
@@ -207,6 +210,10 @@ def main():
                         help="階段環境で学習する")
     parser.add_argument("--vision", action="store_true",
                         help="地形視覚観測を追加する（OBS +10次元）")
+    parser.add_argument("--lr", type=float, default=3e-4,
+                        help="学習率（デフォルト: 3e-4）")
+    parser.add_argument("--clip-range", type=float, default=0.2,
+                        help="PPOクリップ範囲（デフォルト: 0.2）")
     args = parser.parse_args()
 
     n_chunks = args.steps // CHUNK_STEPS
@@ -237,7 +244,8 @@ def main():
         chunk_num = start_m // 3 + i + 1
         final_path, vecnorm = train_chunk(chunk_num, slope_deg, resume_model, vecnorm,
                                           n_envs=args.n_envs, stairs=args.stairs,
-                                          terrain_vision=args.vision)
+                                          terrain_vision=args.vision, lr=args.lr,
+                                          clip_range=args.clip_range)
         resume_model = final_path
 
         # 3M毎のチェックポイントを保存
@@ -249,6 +257,8 @@ def main():
             src = best_src / fname
             if src.exists():
                 shutil.copy2(src, ckpt_dir / fname)
+        # チェックポイント専用vecnormを保存（動画生成時に使用）
+        shutil.copy2(str(vecnorm), str(ckpt_dir / "vecnorm.pkl"))
         print(f"\n--- チェックポイント {total_m}M 保存: {ckpt_dir} ---")
         if args.vision:
             mode_flag = " --vision"

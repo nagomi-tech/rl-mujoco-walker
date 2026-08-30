@@ -36,6 +36,12 @@ MODELS_DIR = Path("models")
 def find_vecnorm(model_path: Path, slope_deg: float, stairs: bool = False,
                  vision: bool = False) -> Path | None:
     candidates = []
+    # チェックポイント専用vecnormを最優先
+    candidates += [
+        model_path.parent / "vecnorm.pkl",
+        model_path.parent / "best_vecnormalize.pkl",
+        model_path.parent / "vecnormalize.pkl",
+    ]
     if vision:
         candidates += [
             MODELS_DIR / "vision_flat" / "best" / "best_vecnormalize.pkl",
@@ -53,8 +59,6 @@ def find_vecnorm(model_path: Path, slope_deg: float, stairs: bool = False,
             MODELS_DIR / slope_label / "vecnorm.pkl",
         ]
     candidates += [
-        model_path.parent / "best_vecnormalize.pkl",
-        model_path.parent / "vecnormalize.pkl",
         MODELS_DIR / "level0" / "best" / "best_vecnormalize.pkl",
         MODELS_DIR / "level0_vecnorm.pkl",
     ]

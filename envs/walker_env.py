@@ -532,11 +532,30 @@ class BlockyWalkerEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
 
-        noise_q = self.np_random.uniform(-0.005, 0.005, self.model.nq)
-        self.data.qpos[:] = self.model.qpos0 + noise_q
-        self.data.qvel[:] = self.np_random.uniform(-0.005, 0.005, self.model.nv)
-        self.data.qpos[0:3] = [0.0, 0.0, 1.00]
+        # 胴体：固定位置・直立姿勢（少し高めにして足のめり込みを防ぐ）
+        self.data.qpos[0:3] = [0.0, 0.0, 1.05]
         self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+
+        # 関節角度をランダム初期化（各関節の有効範囲の一部でサンプリング）
+        # 順序: left_shoulder, left_elbow, right_shoulder, right_elbow,
+        #       left_hip, left_knee, left_ankle, right_hip, right_knee, right_ankle
+        joint_ranges = [
+            (-0.3,  0.3),   # left_shoulder  (range: -2.0 ~ 1.0)
+            (-0.4,  0.0),   # left_elbow     (range: -1.8 ~ 0.1)
+            (-0.3,  0.3),   # right_shoulder (range: -2.0 ~ 1.0)
+            (-0.4,  0.0),   # right_elbow    (range: -1.8 ~ 0.1)
+            (-0.3,  0.1),   # left_hip       (range: -1.5 ~ 0.3)
+            ( 0.0,  0.4),   # left_knee      (range: -0.1 ~ 1.8)
+            (-0.15, 0.15),  # left_ankle     (range: -0.6 ~ 0.6)
+            (-0.3,  0.1),   # right_hip      (range: -1.5 ~ 0.3)
+            ( 0.0,  0.4),   # right_knee     (range: -0.1 ~ 1.8)
+            (-0.15, 0.15),  # right_ankle    (range: -0.6 ~ 0.6)
+        ]
+        for i, (lo, hi) in enumerate(joint_ranges):
+            self.data.qpos[7 + i] = self.np_random.uniform(lo, hi)
+
+        # 速度もランダム化（小さめ）
+        self.data.qvel[:] = self.np_random.uniform(-0.05, 0.05, self.model.nv)
 
         # ゴールをリセット
         self._goal_x    = STAIRS_GOAL_X if self._stairs else GOAL_INIT_X
@@ -571,13 +590,22 @@ class BlockyWalkerEnv(gym.Env):
         torso_z   = self.data.qpos[2]
         healthy   = self._is_healthy()
 
-        # ---- ゴール進捗報酬 ----
+        # ---- ゴール進捗（距離更新）----
         curr_dist     = max(0.0, self._goal_x - torso_x)
-        progress      = self._prev_dist - curr_dist
         self._prev_dist = curr_dist
 
-        # ゴールへの接近距離のみを報酬とする（ペナルティなし）
-        reward = progress * 50.0
+        # ---- 前進速度報酬 ----
+        vx = float(self.data.qvel[0])   # 根元ジョイントのx方向速度 (m/s)
+        reward = vx * 2.0
+
+        # ---- 直立維持報酬（前傾を抑制、±10度の遊びを許容）----
+        # torso_mat[2, 2] = cos(傾き角)  1.0=直立, cos(10°)≈0.985 を閾値とする
+        torso_mat = self.data.xmat[self._torso_id].reshape(3, 3)
+        upright = float(torso_mat[2, 2])
+        _upright_threshold = 0.9848  # cos(10°)
+        if upright < _upright_threshold:
+            # 10度を超えた傾きにのみペナルティ（最大 -0.5 程度）
+            reward += (upright - _upright_threshold) * 0.5
 
         # ---- ゴール到達ボーナス ----
         if torso_x >= self._goal_x:
