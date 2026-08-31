@@ -34,7 +34,7 @@ MODELS_DIR = Path("models")
 
 
 def find_vecnorm(model_path: Path, slope_deg: float, stairs: bool = False,
-                 vision: bool = False) -> Path | None:
+                 vision: bool = False, bumpy: bool = False) -> Path | None:
     candidates = []
     # チェックポイント専用vecnormを最優先
     candidates += [
@@ -42,6 +42,11 @@ def find_vecnorm(model_path: Path, slope_deg: float, stairs: bool = False,
         model_path.parent / "best_vecnormalize.pkl",
         model_path.parent / "vecnormalize.pkl",
     ]
+    if bumpy:
+        candidates += [
+            MODELS_DIR / "bumpy" / "best" / "best_vecnormalize.pkl",
+            MODELS_DIR / "bumpy" / "vecnorm.pkl",
+        ]
     if vision:
         candidates += [
             MODELS_DIR / "vision_flat" / "best" / "best_vecnormalize.pkl",
@@ -78,12 +83,15 @@ def main():
     parser.add_argument("--level", type=int, default=0)
     parser.add_argument("--stairs", action="store_true", help="階段環境で表示")
     parser.add_argument("--vision", action="store_true", help="地形視覚観測ありモデルで表示")
+    parser.add_argument("--bumpy", action="store_true", help="凹凸地形モデルで表示")
     parser.add_argument("--speed", type=float, default=1.0,
                         help="再生速度倍率（0.5=スロー、2.0=高速）")
     args = parser.parse_args()
 
     default_model = "models/slope0deg/best/best_model"
-    if args.stairs and args.model == default_model:
+    if args.bumpy and args.model == default_model:
+        args.model = "models/bumpy/best/best_model"
+    elif args.stairs and args.model == default_model:
         args.model = "models/stairs/best/best_model"
     elif args.vision and args.model == default_model:
         args.model = "models/vision_flat/best/best_model"
@@ -94,7 +102,7 @@ def main():
         sys.exit(1)
 
     vn_path = Path(args.vecnorm) if args.vecnorm else find_vecnorm(
-        model_path, args.slope, args.stairs, args.vision)
+        model_path, args.slope, args.stairs, args.vision, args.bumpy)
 
     # render_mode=None で環境作成（ビューアは手動で開く）
     env = DummyVecEnv([lambda: BlockyWalkerEnv(
@@ -102,6 +110,7 @@ def main():
         slope_deg=args.slope,
         stairs=args.stairs,
         terrain_vision=args.vision,
+        bumpy=args.bumpy,
         render_mode=None,
     )])
 

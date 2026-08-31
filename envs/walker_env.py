@@ -44,6 +44,16 @@ N_ACTS  = 10
 N_HEIGHT_SAMPLES = 10
 HEIGHT_SAMPLE_OFFSETS = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5]  # 前方サンプル点(m)
 
+# 凹凸地形 (heightfield)
+BUMPY_NROW    = 32      # y方向グリッド数
+BUMPY_NCOL    = 128     # x方向グリッド数
+BUMPY_X_START = -1.0    # 地形x開始座標
+BUMPY_X_END   = 16.0    # 地形x終了座標
+BUMPY_Y_HALF  = 3.0     # y方向半幅 (m)
+BUMPY_Z_SCALE = 0.15    # 凹凸の最大高さ (m)  ← 足高さ(0.04m)の約4倍
+BUMPY_CX      = (BUMPY_X_START + BUMPY_X_END) / 2   # = 7.5 (geom center x)
+BUMPY_X_HALF  = (BUMPY_X_END   - BUMPY_X_START) / 2 # = 8.5
+
 
 # ---------------------------------------------------------------------------
 # XML ビルダー
@@ -93,7 +103,7 @@ def _robot_bodies_xml() -> str:
           <body name="left_foot" pos="0 0 -0.30">
             <joint name="left_ankle" type="hinge" axis="0 1 0" range="-0.6 0.6"/>
             <geom name="left_foot_geom" type="box" size="0.13 0.08 0.04"
-                  pos="0.04 0 -0.04" material="mat_robot"/>
+                  pos="0.0 0 -0.04" material="mat_robot"/>
           </body>
         </body>
       </body>
@@ -108,7 +118,7 @@ def _robot_bodies_xml() -> str:
           <body name="right_foot" pos="0 0 -0.30">
             <joint name="right_ankle" type="hinge" axis="0 1 0" range="-0.6 0.6"/>
             <geom name="right_foot_geom" type="box" size="0.13 0.08 0.04"
-                  pos="0.04 0 -0.04" material="mat_robot"/>
+                  pos="0.0 0 -0.04" material="mat_robot"/>
           </body>
         </body>
       </body>
@@ -133,8 +143,8 @@ def _actuators_xml() -> str:
 """
 
 
-def _header_xml() -> str:
-    return """<mujoco model="blocky_walker">
+def _header_xml(extra_assets: str = "") -> str:
+    return f"""<mujoco model="blocky_walker">
   <compiler angle="radian"/>
   <option timestep="0.005" integrator="RK4" iterations="50"/>
 
@@ -151,7 +161,7 @@ def _header_xml() -> str:
     <material name="mat_wall"   rgba="0.92 0.92 0.92 1"/>
     <material name="mat_cube"   rgba="0.85 0.15 0.15 1"/>
     <material name="mat_goal"   rgba="0.10 0.90 0.20 0.45"/>
-  </asset>
+{extra_assets}  </asset>
 """
 
 
@@ -233,6 +243,46 @@ def _wall_segments_xml(wall_x: float, gap_center_y: float, gap_width: float,
     return "\n".join(parts) + "\n"
 
 
+def _bumpy_lights_xml() -> str:
+    """凹凸地形用：heightfield geom を floor として使用。"""
+    return f"""
+    <light pos="2 -2 6"  dir="-0.3 0.5 -1" diffuse="0.7 0.7 0.7" specular="0.1 0.1 0.1"/>
+    <light pos="-2 2 6"  dir="0.3 -0.5 -1" diffuse="0.5 0.5 0.5"/>
+    <geom name="floor" type="hfield" hfield="terrain" pos="{BUMPY_CX} 0 0"
+          contype="1" conaffinity="1" material="mat_floor"/>
+    <camera name="track" pos="5 -12 5" xyaxes="1 0 0 0 0.32 0.95" fovy="55"/>
+"""
+
+
+def _make_bumpy_heights(nrow: int, ncol: int, rng: np.random.Generator) -> np.ndarray:
+    """
+    凹凸地形の高さマップを生成する。
+    Returns: shape=(nrow, ncol), 値 0.0~1.0 (× BUMPY_Z_SCALE = 実高さ m)
+
+    ロボットのサイズ感:
+      足サイズ 0.13m, 最大バンプ高さ 15cm (= 足高さ 0.04m の約4倍)
+      波長 1.0~3.0m — 大きめピッチで地形を固定し学習を安定させる
+    スタート付近 (x < 2m) は平坦にして安定起動を確保する。
+    地形はエピソード間で固定（seed=0）。
+    """
+    x = np.linspace(BUMPY_X_START, BUMPY_X_END, ncol)
+    y = np.linspace(-BUMPY_Y_HALF, BUMPY_Y_HALF, nrow)
+    X, Y = np.meshgrid(x, y)
+
+    h = np.zeros((nrow, ncol))
+    # ピッチ2m固定の単一正弦波（位相はseed=0固定）
+    h += np.sin(2 * np.pi * X / 2.0) * np.cos(2 * np.pi * Y / 3.0)
+
+    # 0.0 ~ 1.0 に正規化
+    h = (h - h.min()) / (h.max() - h.min() + 1e-8)
+
+    # x=0~2m をブレンドで平坦化（ロボット起動位置を安定化）
+    ramp = np.clip(X / 2.0, 0.0, 1.0)
+    h *= ramp
+
+    return h
+
+
 def _hurdles_xml(height: float = 0.08, spacing: float = 0.5,
                  start_x: float = 1.5, end_x: float = 9.5,
                  half_width_x: float = 0.075) -> str:
@@ -246,6 +296,20 @@ def _hurdles_xml(height: float = 0.08, spacing: float = 0.5,
             f'pos="{rx:.2f} 0 {height/2:.4f}" '
             f'rgba="0.60 0.40 0.20 1" contype="1" conaffinity="1"/>')
     return "\n".join(lines) + "\n"
+
+
+def build_bumpy_xml() -> str:
+    """凹凸地形 (heightfield) の XML を生成する。hfield_data は Python 側で設定する。"""
+    hfield_asset = (f'    <hfield name="terrain" nrow="{BUMPY_NROW}" ncol="{BUMPY_NCOL}" '
+                    f'size="{BUMPY_X_HALF} {BUMPY_Y_HALF} {BUMPY_Z_SCALE} 0.05"/>\n')
+    return (_header_xml(extra_assets=hfield_asset)
+            + "\n  <worldbody>"
+            + _bumpy_lights_xml()
+            + _goal_marker_xml(GOAL_INIT_X)
+            + _robot_bodies_xml()
+            + "\n  </worldbody>\n"
+            + _actuators_xml()
+            + "\n</mujoco>")
 
 
 def build_level0_xml(slope_deg: float = 0.0) -> str:
@@ -308,9 +372,12 @@ def build_level2_xml() -> str:
             + "\n</mujoco>")
 
 
-def build_xml(level: int, slope_deg: float = 0.0, stairs: bool = False) -> str:
+def build_xml(level: int, slope_deg: float = 0.0, stairs: bool = False,
+              bumpy: bool = False) -> str:
     if stairs:
         return build_stairs_xml()
+    if bumpy:
+        return build_bumpy_xml()
     if level == 0:
         return build_level0_xml(slope_deg)
     return {1: build_level1_xml, 2: build_level2_xml}[level]()
@@ -335,7 +402,7 @@ class BlockyWalkerEnv(gym.Env):
 
     def __init__(self, level: int = 0, render_mode: str | None = None,
                  slope_deg: float = 0.0, stairs: bool = False,
-                 terrain_vision: bool = False):
+                 terrain_vision: bool = False, bumpy: bool = False):
         super().__init__()
         assert 0 <= level <= 2
         self.level = level
@@ -344,8 +411,10 @@ class BlockyWalkerEnv(gym.Env):
         self._slope_tan = math.tan(math.radians(slope_deg))
         self._stairs = stairs
         self._terrain_vision = terrain_vision
+        self._bumpy = bumpy
+        self._bumpy_heights: np.ndarray | None = None  # reset() で生成
 
-        xml = build_xml(level, slope_deg, stairs)
+        xml = build_xml(level, slope_deg, stairs, bumpy)
         self.model = mujoco.MjModel.from_xml_string(xml)
         self.data  = mujoco.MjData(self.model)
 
@@ -356,6 +425,11 @@ class BlockyWalkerEnv(gym.Env):
         self._torso_id      = _body("torso")
         self._torso_geom_id = _geom("torso_box")
         self._floor_geom_id = _geom("floor")
+
+        # 凹凸地形：heightfield アドレスを保持
+        if bumpy:
+            hfield_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain")
+            self._hfield_adr = int(self.model.hfield_adr[hfield_id])
 
         # 足ジオム（交互歩行報酬用）
         self._left_foot_geom_id  = _geom("left_foot_geom")
@@ -392,6 +466,13 @@ class BlockyWalkerEnv(gym.Env):
                 gid = _geom(f"cube_{i}_geom")
                 self._cube_body_ids.append(bid)
                 self._cube_geom_ids.add(gid)
+
+        # 凹凸地形：heightfield アドレスを保持し、初期地形を生成
+        if bumpy:
+            hfield_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain")
+            self._hfield_adr = int(self.model.hfield_adr[hfield_id])
+            # view.py 起動直後から地形が見えるよう __init__ 時点で初期化
+            self._regenerate_terrain(np.random.default_rng(0))
 
         # ---- 観測・行動空間 ----
         obs_dim = OBS_DIM + (N_HEIGHT_SAMPLES if terrain_vision else 0)
@@ -444,7 +525,17 @@ class BlockyWalkerEnv(gym.Env):
         return np.clip(base_obs, -10.0, 10.0)
 
     def _terrain_z(self, torso_x: float) -> float:
-        """現在のx位置での地形の高さを返す。"""
+        """現在のx位置での地形の高さを返す（y=0 中心線）。"""
+        if self._bumpy and self._bumpy_heights is not None:
+            col_f = (torso_x - BUMPY_X_START) / (BUMPY_X_END - BUMPY_X_START) * (BUMPY_NCOL - 1)
+            col_f = float(np.clip(col_f, 0, BUMPY_NCOL - 1))
+            col0 = int(col_f)
+            col1 = min(col0 + 1, BUMPY_NCOL - 1)
+            t = col_f - col0
+            row = BUMPY_NROW // 2  # y=0 中心行
+            h = (self._bumpy_heights[row, col0] * (1 - t) +
+                 self._bumpy_heights[row, col1] * t)
+            return float(h * BUMPY_Z_SCALE)
         if self._stairs:
             if torso_x < STAIR_START_X:
                 return 0.0
@@ -454,6 +545,14 @@ class BlockyWalkerEnv(gym.Env):
             else:
                 return STAIR_TOP_Z
         return torso_x * self._slope_tan
+
+    def _regenerate_terrain(self, rng: np.random.Generator) -> None:
+        """凹凸地形をランダム再生成して model.hfield_data を更新する。"""
+        self._bumpy_heights = _make_bumpy_heights(BUMPY_NROW, BUMPY_NCOL, rng)
+        n = BUMPY_NROW * BUMPY_NCOL
+        self.model.hfield_data[self._hfield_adr:self._hfield_adr + n] = (
+            self._bumpy_heights.flatten()
+        )
 
     def _is_healthy(self) -> bool:
         torso_x = max(0.0, self.data.xpos[self._torso_id][0])
@@ -532,30 +631,31 @@ class BlockyWalkerEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
 
-        # 胴体：固定位置・直立姿勢（少し高めにして足のめり込みを防ぐ）
-        self.data.qpos[0:3] = [0.0, 0.0, 1.05]
+        # 胴体：仮の高い位置に設定し、後で足底が地面に来るよう調整する
+        self.data.qpos[0:3] = [0.0, 0.0, 2.0]
         self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
 
-        # 関節角度をランダム初期化（各関節の有効範囲の一部でサンプリング）
-        # 順序: left_shoulder, left_elbow, right_shoulder, right_elbow,
-        #       left_hip, left_knee, left_ankle, right_hip, right_knee, right_ankle
-        joint_ranges = [
-            (-0.3,  0.3),   # left_shoulder  (range: -2.0 ~ 1.0)
-            (-0.4,  0.0),   # left_elbow     (range: -1.8 ~ 0.1)
-            (-0.3,  0.3),   # right_shoulder (range: -2.0 ~ 1.0)
-            (-0.4,  0.0),   # right_elbow    (range: -1.8 ~ 0.1)
-            (-0.3,  0.1),   # left_hip       (range: -1.5 ~ 0.3)
-            ( 0.0,  0.4),   # left_knee      (range: -0.1 ~ 1.8)
-            (-0.15, 0.15),  # left_ankle     (range: -0.6 ~ 0.6)
-            (-0.3,  0.1),   # right_hip      (range: -1.5 ~ 0.3)
-            ( 0.0,  0.4),   # right_knee     (range: -0.1 ~ 1.8)
-            (-0.15, 0.15),  # right_ankle    (range: -0.6 ~ 0.6)
-        ]
-        for i, (lo, hi) in enumerate(joint_ranges):
-            self.data.qpos[7 + i] = self.np_random.uniform(lo, hi)
+        # 関節角度を直立固定値に設定（全関節0 = 直立姿勢）
+        self.data.qpos[7:17] = 0.0
 
-        # 速度もランダム化（小さめ）
-        self.data.qvel[:] = self.np_random.uniform(-0.05, 0.05, self.model.nv)
+        # エピソードごとに凹凸地形をランダム生成
+        if self._bumpy:
+            self._regenerate_terrain(self.np_random)
+
+        # 順運動学を計算して足底位置を取得し、胴体高さを自動調整
+        mujoco.mj_forward(self.model, self.data)
+        FOOT_BOTTOM_OFFSET = 0.08  # geom_pos_z(-0.04) + geom_half_size_z(0.04)
+        left_bid  = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_foot")
+        right_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_foot")
+        min_foot_bottom = min(
+            self.data.xpos[left_bid][2]  - FOOT_BOTTOM_OFFSET,
+            self.data.xpos[right_bid][2] - FOOT_BOTTOM_OFFSET,
+        )
+        # 最低足底が地面（z≈0）に来るよう胴体Zを調整（5mmバッファ）
+        self.data.qpos[2] += (0.005 - min_foot_bottom)
+
+        # 速度ゼロ初期化
+        self.data.qvel[:] = 0.0
 
         # ゴールをリセット
         self._goal_x    = STAIRS_GOAL_X if self._stairs else GOAL_INIT_X
@@ -594,9 +694,10 @@ class BlockyWalkerEnv(gym.Env):
         curr_dist     = max(0.0, self._goal_x - torso_x)
         self._prev_dist = curr_dist
 
-        # ---- 前進速度報酬 ----
+        # ---- 前進速度報酬（tanh: 1.5 m/s で飽和）----
         vx = float(self.data.qvel[0])   # 根元ジョイントのx方向速度 (m/s)
-        reward = vx * 2.0
+        V_TARGET = 1.5
+        reward = float(np.tanh(vx / V_TARGET)) * 2.0
 
         # ---- 直立維持報酬（前傾を抑制、±10度の遊びを許容）----
         # torso_mat[2, 2] = cos(傾き角)  1.0=直立, cos(10°)≈0.985 を閾値とする
@@ -615,7 +716,23 @@ class BlockyWalkerEnv(gym.Env):
             self.data.mocap_pos[self._goal_mocap_idx] = [self._goal_x, 0.0, goal_z]
             self._prev_dist = max(0.0, self._goal_x - torso_x)
 
-        # ---- 手・膝・脛ペナルティ: なし ----
+        # ---- 膝・脛接地ペナルティ ----
+        if self._shin_on_ground():
+            reward -= 1.0
+
+        # ---- 足間角度制限ペナルティ（100度超でペナルティ）----
+        INTER_LEG_LIMIT = 100.0 * np.pi / 180.0  # 1.745 rad
+        left_hip  = float(self.data.qpos[self._left_hip_qpos])
+        right_hip = float(self.data.qpos[self._right_hip_qpos])
+        inter_leg_angle = abs(left_hip - right_hip)
+        if inter_leg_angle > INTER_LEG_LIMIT:
+            reward -= (inter_leg_angle - INTER_LEG_LIMIT) * 2.0
+
+        # ---- 胴体高さペナルティ（腰を落としすぎた場合のみ）----
+        MIN_WALK_HEIGHT = 0.75  # 通常歩行高さ 1.0m の 75%
+        height_above_floor = torso_z - self._terrain_z(torso_x)
+        if height_above_floor < MIN_WALK_HEIGHT:
+            reward -= (MIN_WALK_HEIGHT - height_above_floor) * 2.0
 
         # ---- 壁通過ボーナス (Level 1+) ----
         if self.level >= 1 and not self._wall1_passed and torso_x > 4.6:
@@ -643,7 +760,9 @@ class BlockyWalkerEnv(gym.Env):
                 self._wall2_passed = True
             reward += self._manage_cubes()
 
-        # ---- 転倒ペナルティ: なし ----
+        # ---- 転倒ペナルティ ----
+        if not healthy:
+            reward -= 10.0
 
         terminated = not healthy
         truncated  = self._step_count >= MAX_STEPS
