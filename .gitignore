@@ -5,8 +5,12 @@ __pycache__/
 *.pyo
 .env
 
-# モデルファイル（大きいため除外）
-models/
+# モデルファイル（大きいため除外、ベストのみ例外）
+models/**
+!models/combined/
+!models/combined/best/
+!models/combined/best/best_model.zip
+!models/combined/vecnorm.pkl
 
 # 学習ログ
 logs/

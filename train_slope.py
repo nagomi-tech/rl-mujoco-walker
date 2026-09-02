@@ -77,13 +77,14 @@ class MilestoneCallback(BaseCallback):
 
 def make_slope_env(slope_deg: float, n_envs: int = N_ENVS, render: bool = False,
                    stairs: bool = False, terrain_vision: bool = False,
-                   bumpy: bool = False):
+                   bumpy: bool = False, combined: bool = False):
     def _make():
         return BlockyWalkerEnv(level=0,
                                slope_deg=slope_deg,
                                stairs=stairs,
                                terrain_vision=terrain_vision,
                                bumpy=bumpy,
+                               combined=combined,
                                render_mode="rgb_array" if render else None)
     vec_cls = SubprocVecEnv if n_envs > 1 else DummyVecEnv
     return make_vec_env(_make, n_envs=n_envs, vec_env_cls=vec_cls)
@@ -258,6 +259,8 @@ def main():
                         help="地形視覚観測を追加する（OBS +10次元）")
     parser.add_argument("--bumpy", action="store_true",
                         help="凹凸地形（heightfield）で学習する")
+    parser.add_argument("--combined", action="store_true",
+                        help="合成地形（平坦→バンプ→階段、ゴール30m）で学習する")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="学習率（デフォルト: 1e-4）")
     parser.add_argument("--clip-range", type=float, default=0.2,
@@ -265,7 +268,10 @@ def main():
     args = parser.parse_args()
 
     slope_deg = args.slope
-    if args.bumpy:
+    if args.combined:
+        args.vision = True  # combined時は視覚情報を必ず有効化
+        label = "combined"
+    elif args.bumpy:
         args.vision = True  # bumpy時は視覚情報を必ず有効化
         label = "bumpy"
     elif args.vision:
@@ -293,8 +299,10 @@ def main():
         print(f"=== 新規学習: {label} / {total_steps//1_000_000}M ステップ ===")
     print(f"  並列環境数: {args.n_envs}")
 
+    combined = getattr(args, 'combined', False)
     train_venv = make_slope_env(slope_deg, n_envs=args.n_envs, stairs=args.stairs,
-                                terrain_vision=args.vision, bumpy=args.bumpy)
+                                terrain_vision=args.vision, bumpy=args.bumpy,
+                                combined=combined)
     if resuming:
         train_env = VecNormalize.load(str(resume_vecnorm), train_venv)
         train_env.training = True
@@ -303,7 +311,8 @@ def main():
         train_env = VecNormalize(train_venv, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
     eval_venv = make_slope_env(slope_deg, n_envs=1, stairs=args.stairs,
-                               terrain_vision=args.vision, bumpy=args.bumpy)
+                               terrain_vision=args.vision, bumpy=args.bumpy,
+                               combined=combined)
     if resuming:
         eval_env = VecNormalize.load(str(resume_vecnorm), eval_venv)
         eval_env.training = False

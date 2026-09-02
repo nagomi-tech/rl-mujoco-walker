@@ -54,6 +54,25 @@ BUMPY_Z_SCALE = 0.15    # 凹凸の最大高さ (m)  ← 足高さ(0.04m)の約4
 BUMPY_CX      = (BUMPY_X_START + BUMPY_X_END) / 2   # = 7.5 (geom center x)
 BUMPY_X_HALF  = (BUMPY_X_END   - BUMPY_X_START) / 2 # = 8.5
 
+# 合成地形定数 (平坦 → バンプ → 階段、ゴール 30m)
+COMBINED_X_START    = -1.0
+COMBINED_X_END      = 31.0
+COMBINED_X_HALF     = (COMBINED_X_END - COMBINED_X_START) / 2   # 16.0
+COMBINED_CX         = (COMBINED_X_START + COMBINED_X_END) / 2   # 15.0
+COMBINED_Y_HALF     = 3.0
+COMBINED_Z_SCALE    = 0.40    # 最大高さ = 階段トップ (8 × 0.05m)
+COMBINED_NROW       = 32
+COMBINED_NCOL       = 256
+
+COMBINED_BUMPY_START = 10.0   # バンプ開始
+COMBINED_BUMPY_END   = 19.0   # バンプ終了 (階段前1m平坦)
+COMBINED_STAIR_START = 20.0   # 階段開始
+COMBINED_N_STAIRS    = 8
+COMBINED_STAIR_H     = 0.05   # 1段の高さ
+COMBINED_STAIR_DEPTH = 0.625  # 1段の奥行き (8 × 0.625 = 5.0m)
+COMBINED_STAIR_END   = COMBINED_STAIR_START + COMBINED_N_STAIRS * COMBINED_STAIR_DEPTH  # 25.0m
+COMBINED_GOAL_X      = 30.0
+
 
 # ---------------------------------------------------------------------------
 # XML ビルダー
@@ -283,6 +302,49 @@ def _make_bumpy_heights(nrow: int, ncol: int, rng: np.random.Generator) -> np.nd
     return h
 
 
+def _make_combined_heights(nrow: int, ncol: int, rng: np.random.Generator) -> np.ndarray:
+    """
+    合成地形の高さマップを生成する。
+    - 0〜10m: 平坦 (height=0)
+    - 10〜19m: バンプ (ランダム正弦波、最大0.15m)
+    - 19〜20m: 平坦遷移
+    - 20〜25m: 階段 (8段 × 0.05m)
+    - 25〜31m: プラトー (0.40m)
+    Returns: shape=(nrow, ncol), 値 0.0~1.0 (× COMBINED_Z_SCALE = 実高さ m)
+    """
+    x = np.linspace(COMBINED_X_START, COMBINED_X_END, ncol)
+    y = np.linspace(-COMBINED_Y_HALF, COMBINED_Y_HALF, nrow)
+    X, Y = np.meshgrid(x, y)
+
+    h = np.zeros((nrow, ncol), dtype=np.float64)
+
+    # --- バンプ区間 (10-19m) ---
+    phase_x = rng.uniform(0, 2 * np.pi)
+    phase_y = rng.uniform(0, 2 * np.pi)
+    raw = np.sin(2 * np.pi * X / 2.0 + phase_x) * np.cos(2 * np.pi * Y / 3.0 + phase_y)
+    raw = (raw - raw.min()) / (raw.max() - raw.min() + 1e-8)
+    bumpy_scale = 0.15 / COMBINED_Z_SCALE   # 0.375
+    # 入口(10→11m)と出口(18→19m)でランプして緩やかに遷移
+    ramp_up   = np.clip((X - COMBINED_BUMPY_START) / 1.0, 0.0, 1.0)
+    ramp_down = np.clip((COMBINED_BUMPY_END - X) / 1.0, 0.0, 1.0)
+    envelope  = ramp_up * ramp_down
+    in_bumpy = (X >= COMBINED_BUMPY_START) & (X <= COMBINED_BUMPY_END)
+    h[in_bumpy] = raw[in_bumpy] * bumpy_scale * envelope[in_bumpy]
+
+    # --- 階段区間 (20-25m) ---
+    in_stairs = (X >= COMBINED_STAIR_START) & (X <= COMBINED_STAIR_END)
+    stair_rel = X - COMBINED_STAIR_START
+    stair_idx = np.clip(np.floor(stair_rel / COMBINED_STAIR_DEPTH).astype(int),
+                        0, COMBINED_N_STAIRS - 1)
+    stair_h_norm = (stair_idx + 1) * COMBINED_STAIR_H / COMBINED_Z_SCALE
+    h[in_stairs] = stair_h_norm[in_stairs]
+
+    # --- プラトー区間 (25m〜) ---
+    h[X > COMBINED_STAIR_END] = COMBINED_N_STAIRS * COMBINED_STAIR_H / COMBINED_Z_SCALE
+
+    return h.astype(np.float32)
+
+
 def _hurdles_xml(height: float = 0.08, spacing: float = 0.5,
                  start_x: float = 1.5, end_x: float = 9.5,
                  half_width_x: float = 0.075) -> str:
@@ -310,6 +372,32 @@ def build_bumpy_xml() -> str:
             + "\n  </worldbody>\n"
             + _actuators_xml()
             + "\n</mujoco>")
+
+
+def build_combined_xml() -> str:
+    """合成地形 (平坦→バンプ→階段) の XML。hfield_data は Python 側で設定する。"""
+    hfield_asset = (
+        f'    <hfield name="terrain" nrow="{COMBINED_NROW}" ncol="{COMBINED_NCOL}" '
+        f'size="{COMBINED_X_HALF} {COMBINED_Y_HALF} {COMBINED_Z_SCALE} 0.05"/>\n'
+    )
+    world_xml = (
+        f'\n    <light pos="10 -2 8" dir="-0.3 0.5 -1" diffuse="0.7 0.7 0.7" specular="0.1 0.1 0.1"/>\n'
+        f'    <light pos="20 2 8"  dir="0.3 -0.5 -1" diffuse="0.5 0.5 0.5"/>\n'
+        f'    <geom name="floor" type="hfield" hfield="terrain" pos="{COMBINED_CX} 0 0"\n'
+        f'          contype="1" conaffinity="1" material="mat_floor"/>\n'
+        f'    <camera name="track" pos="5 -12 5" xyaxes="1 0 0 0 0.32 0.95" fovy="55"/>\n'
+    )
+    goal_z = COMBINED_N_STAIRS * COMBINED_STAIR_H
+    return (
+        _header_xml(extra_assets=hfield_asset)
+        + "\n  <worldbody>"
+        + world_xml
+        + _goal_marker_xml(COMBINED_GOAL_X, goal_z)
+        + _robot_bodies_xml()
+        + "\n  </worldbody>\n"
+        + _actuators_xml()
+        + "\n</mujoco>"
+    )
 
 
 def build_level0_xml(slope_deg: float = 0.0) -> str:
@@ -373,7 +461,9 @@ def build_level2_xml() -> str:
 
 
 def build_xml(level: int, slope_deg: float = 0.0, stairs: bool = False,
-              bumpy: bool = False) -> str:
+              bumpy: bool = False, combined: bool = False) -> str:
+    if combined:
+        return build_combined_xml()
     if stairs:
         return build_stairs_xml()
     if bumpy:
@@ -402,7 +492,8 @@ class BlockyWalkerEnv(gym.Env):
 
     def __init__(self, level: int = 0, render_mode: str | None = None,
                  slope_deg: float = 0.0, stairs: bool = False,
-                 terrain_vision: bool = False, bumpy: bool = False):
+                 terrain_vision: bool = False, bumpy: bool = False,
+                 combined: bool = False):
         super().__init__()
         assert 0 <= level <= 2
         self.level = level
@@ -412,9 +503,10 @@ class BlockyWalkerEnv(gym.Env):
         self._stairs = stairs
         self._terrain_vision = terrain_vision
         self._bumpy = bumpy
+        self._combined = combined
         self._bumpy_heights: np.ndarray | None = None  # reset() で生成
 
-        xml = build_xml(level, slope_deg, stairs, bumpy)
+        xml = build_xml(level, slope_deg, stairs, bumpy, combined)
         self.model = mujoco.MjModel.from_xml_string(xml)
         self.data  = mujoco.MjData(self.model)
 
@@ -468,11 +560,14 @@ class BlockyWalkerEnv(gym.Env):
                 self._cube_geom_ids.add(gid)
 
         # 凹凸地形：heightfield アドレスを保持し、初期地形を生成
-        if bumpy:
+        if bumpy or combined:
             hfield_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain")
             self._hfield_adr = int(self.model.hfield_adr[hfield_id])
             # view.py 起動直後から地形が見えるよう __init__ 時点で初期化
-            self._regenerate_terrain(np.random.default_rng(0))
+            if combined:
+                self._regenerate_combined_terrain(np.random.default_rng(0))
+            else:
+                self._regenerate_terrain(np.random.default_rng(0))
 
         # ---- 観測・行動空間 ----
         obs_dim = OBS_DIM + (N_HEIGHT_SAMPLES if terrain_vision else 0)
@@ -503,7 +598,8 @@ class BlockyWalkerEnv(gym.Env):
         hand_flag = float(self._arm_on_ground())
 
         if self.level == 0:
-            obs4 = np.array([dist_to_goal / GOAL_INIT_X, hand_flag, 0.0, 0.0], dtype=np.float32)
+            goal_norm = COMBINED_GOAL_X if self._combined else GOAL_INIT_X
+            obs4 = np.array([dist_to_goal / goal_norm, hand_flag, 0.0, 0.0], dtype=np.float32)
         elif self.level == 1:
             dx_wall = np.clip((4.0 - torso_pos[0]) / 8.0, -1.0, 1.0)
             obs4 = np.array([dist_to_goal / GOAL_INIT_X, hand_flag, dx_wall, 0.0], dtype=np.float32)
@@ -526,6 +622,17 @@ class BlockyWalkerEnv(gym.Env):
 
     def _terrain_z(self, torso_x: float) -> float:
         """現在のx位置での地形の高さを返す（y=0 中心線）。"""
+        if self._combined and self._bumpy_heights is not None:
+            col_f = ((torso_x - COMBINED_X_START)
+                     / (COMBINED_X_END - COMBINED_X_START) * (COMBINED_NCOL - 1))
+            col_f = float(np.clip(col_f, 0, COMBINED_NCOL - 1))
+            col0 = int(col_f)
+            col1 = min(col0 + 1, COMBINED_NCOL - 1)
+            t = col_f - col0
+            row = COMBINED_NROW // 2
+            h = (self._bumpy_heights[row, col0] * (1 - t) +
+                 self._bumpy_heights[row, col1] * t)
+            return float(h * COMBINED_Z_SCALE)
         if self._bumpy and self._bumpy_heights is not None:
             col_f = (torso_x - BUMPY_X_START) / (BUMPY_X_END - BUMPY_X_START) * (BUMPY_NCOL - 1)
             col_f = float(np.clip(col_f, 0, BUMPY_NCOL - 1))
@@ -550,6 +657,14 @@ class BlockyWalkerEnv(gym.Env):
         """凹凸地形をランダム再生成して model.hfield_data を更新する。"""
         self._bumpy_heights = _make_bumpy_heights(BUMPY_NROW, BUMPY_NCOL, rng)
         n = BUMPY_NROW * BUMPY_NCOL
+        self.model.hfield_data[self._hfield_adr:self._hfield_adr + n] = (
+            self._bumpy_heights.flatten()
+        )
+
+    def _regenerate_combined_terrain(self, rng: np.random.Generator) -> None:
+        """合成地形をランダム再生成（バンプ部分のみランダム）して model.hfield_data を更新する。"""
+        self._bumpy_heights = _make_combined_heights(COMBINED_NROW, COMBINED_NCOL, rng)
+        n = COMBINED_NROW * COMBINED_NCOL
         self.model.hfield_data[self._hfield_adr:self._hfield_adr + n] = (
             self._bumpy_heights.flatten()
         )
@@ -638,9 +753,11 @@ class BlockyWalkerEnv(gym.Env):
         # 関節角度を直立固定値に設定（全関節0 = 直立姿勢）
         self.data.qpos[7:17] = 0.0
 
-        # エピソードごとに凹凸地形をランダム生成
+        # エピソードごとに地形をランダム生成
         if self._bumpy:
             self._regenerate_terrain(self.np_random)
+        elif self._combined:
+            self._regenerate_combined_terrain(self.np_random)
 
         # 順運動学を計算して足底位置を取得し、胴体高さを自動調整
         mujoco.mj_forward(self.model, self.data)
@@ -658,9 +775,16 @@ class BlockyWalkerEnv(gym.Env):
         self.data.qvel[:] = 0.0
 
         # ゴールをリセット
-        self._goal_x    = STAIRS_GOAL_X if self._stairs else GOAL_INIT_X
+        if self._combined:
+            self._goal_x = COMBINED_GOAL_X
+            goal_z = COMBINED_N_STAIRS * COMBINED_STAIR_H
+        elif self._stairs:
+            self._goal_x = STAIRS_GOAL_X
+            goal_z = STAIR_TOP_Z
+        else:
+            self._goal_x = GOAL_INIT_X
+            goal_z = self._goal_x * self._slope_tan
         self._prev_dist = self._goal_x
-        goal_z = STAIR_TOP_Z if self._stairs else self._goal_x * self._slope_tan
         self.data.mocap_pos[self._goal_mocap_idx] = [self._goal_x, 0.0, goal_z]
 
         mujoco.mj_forward(self.model, self.data)
@@ -712,7 +836,12 @@ class BlockyWalkerEnv(gym.Env):
         if torso_x >= self._goal_x:
             reward += 200.0
             self._goal_x += GOAL_STEP_X
-            goal_z = STAIR_TOP_Z if self._stairs else self._goal_x * self._slope_tan
+            if self._combined:
+                goal_z = COMBINED_N_STAIRS * COMBINED_STAIR_H
+            elif self._stairs:
+                goal_z = STAIR_TOP_Z
+            else:
+                goal_z = self._goal_x * self._slope_tan
             self.data.mocap_pos[self._goal_mocap_idx] = [self._goal_x, 0.0, goal_z]
             self._prev_dist = max(0.0, self._goal_x - torso_x)
 
@@ -732,7 +861,7 @@ class BlockyWalkerEnv(gym.Env):
         MIN_WALK_HEIGHT = 0.75  # 通常歩行高さ 1.0m の 75%
         height_above_floor = torso_z - self._terrain_z(torso_x)
         if height_above_floor < MIN_WALK_HEIGHT:
-            reward -= (MIN_WALK_HEIGHT - height_above_floor) * 2.0
+            reward -= (MIN_WALK_HEIGHT - height_above_floor) * 10.0
 
         # ---- 壁通過ボーナス (Level 1+) ----
         if self.level >= 1 and not self._wall1_passed and torso_x > 4.6:
