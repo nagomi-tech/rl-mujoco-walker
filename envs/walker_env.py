@@ -54,24 +54,26 @@ BUMPY_Z_SCALE = 0.15    # 凹凸の最大高さ (m)  ← 足高さ(0.04m)の約4
 BUMPY_CX      = (BUMPY_X_START + BUMPY_X_END) / 2   # = 7.5 (geom center x)
 BUMPY_X_HALF  = (BUMPY_X_END   - BUMPY_X_START) / 2 # = 8.5
 
-# 合成地形定数 (平坦 → バンプ → 階段、ゴール 30m)
+# 合成地形定数 (平坦 → バンプ → 階段、ゴール 15m)
 COMBINED_X_START    = -1.0
-COMBINED_X_END      = 31.0
-COMBINED_X_HALF     = (COMBINED_X_END - COMBINED_X_START) / 2   # 16.0
-COMBINED_CX         = (COMBINED_X_START + COMBINED_X_END) / 2   # 15.0
+COMBINED_X_END      = 21.0
+COMBINED_X_HALF     = (COMBINED_X_END - COMBINED_X_START) / 2   # 11.0
+COMBINED_CX         = (COMBINED_X_START + COMBINED_X_END) / 2   # 10.0
 COMBINED_Y_HALF     = 3.0
-COMBINED_Z_SCALE    = 0.40    # 最大高さ = 階段トップ (8 × 0.05m)
+COMBINED_Z_SCALE    = 1.20    # 最大高さ = 階段トップ (8 × 0.15m)
 COMBINED_NROW       = 32
 COMBINED_NCOL       = 256
 
-COMBINED_BUMPY_START = 10.0   # バンプ開始
-COMBINED_BUMPY_END   = 19.0   # バンプ終了 (階段前1m平坦)
-COMBINED_STAIR_START = 20.0   # 階段開始
+COMBINED_BUMPY_START = 5.0    # バンプ開始
+COMBINED_BUMPY_END   = 9.5    # バンプ終了 (階段前0.5m平坦)
+COMBINED_STAIR_START = 10.0   # 階段開始
 COMBINED_N_STAIRS    = 8
-COMBINED_STAIR_H     = 0.05   # 1段の高さ
-COMBINED_STAIR_DEPTH = 0.625  # 1段の奥行き (8 × 0.625 = 5.0m)
-COMBINED_STAIR_END   = COMBINED_STAIR_START + COMBINED_N_STAIRS * COMBINED_STAIR_DEPTH  # 25.0m
-COMBINED_GOAL_X      = 30.0
+COMBINED_STAIR_H     = 0.15   # 1段の高さ
+COMBINED_STAIR_DEPTH = 0.375  # 1段の奥行き (8 × 0.375 = 3.0m)
+COMBINED_STAIR_END   = COMBINED_STAIR_START + COMBINED_N_STAIRS * COMBINED_STAIR_DEPTH  # 13.0m
+COMBINED_PLATEAU_END = 14.5   # プラトー終了（下り階段開始）
+COMBINED_STAIR_DOWN_END = COMBINED_PLATEAU_END + COMBINED_N_STAIRS * COMBINED_STAIR_DEPTH  # 17.5m
+COMBINED_GOAL_X      = 19.0
 
 
 # ---------------------------------------------------------------------------
@@ -305,11 +307,13 @@ def _make_bumpy_heights(nrow: int, ncol: int, rng: np.random.Generator) -> np.nd
 def _make_combined_heights(nrow: int, ncol: int, rng: np.random.Generator) -> np.ndarray:
     """
     合成地形の高さマップを生成する。
-    - 0〜10m: 平坦 (height=0)
-    - 10〜19m: バンプ (ランダム正弦波、最大0.15m)
-    - 19〜20m: 平坦遷移
-    - 20〜25m: 階段 (8段 × 0.05m)
-    - 25〜31m: プラトー (0.40m)
+    -  0〜 5m:  平坦 (height=0)
+    -  5〜 9.5m: バンプ (ランダム正弦波、最大0.30m)
+    -  9.5〜10m: 平坦遷移
+    - 10〜13m:  上り階段 (8段 × 高さ0.15m × 奥行き0.375m)
+    - 13〜14.5m: プラトー (高さ1.20m)
+    - 14.5〜17.5m: 下り階段 (8段 × 高さ0.15m × 奥行き0.375m)
+    - 17.5〜21m: 平坦 (ゴール 19m)
     Returns: shape=(nrow, ncol), 値 0.0~1.0 (× COMBINED_Z_SCALE = 実高さ m)
     """
     x = np.linspace(COMBINED_X_START, COMBINED_X_END, ncol)
@@ -323,7 +327,7 @@ def _make_combined_heights(nrow: int, ncol: int, rng: np.random.Generator) -> np
     phase_y = rng.uniform(0, 2 * np.pi)
     raw = np.sin(2 * np.pi * X / 2.0 + phase_x) * np.cos(2 * np.pi * Y / 3.0 + phase_y)
     raw = (raw - raw.min()) / (raw.max() - raw.min() + 1e-8)
-    bumpy_scale = 0.15 / COMBINED_Z_SCALE   # 0.375
+    bumpy_scale = 0.30 / COMBINED_Z_SCALE   # 0.375
     # 入口(10→11m)と出口(18→19m)でランプして緩やかに遷移
     ramp_up   = np.clip((X - COMBINED_BUMPY_START) / 1.0, 0.0, 1.0)
     ramp_down = np.clip((COMBINED_BUMPY_END - X) / 1.0, 0.0, 1.0)
@@ -339,8 +343,20 @@ def _make_combined_heights(nrow: int, ncol: int, rng: np.random.Generator) -> np
     stair_h_norm = (stair_idx + 1) * COMBINED_STAIR_H / COMBINED_Z_SCALE
     h[in_stairs] = stair_h_norm[in_stairs]
 
-    # --- プラトー区間 (25m〜) ---
-    h[X > COMBINED_STAIR_END] = COMBINED_N_STAIRS * COMBINED_STAIR_H / COMBINED_Z_SCALE
+    # --- プラトー区間 (12.5〜14m) ---
+    in_plateau = (X > COMBINED_STAIR_END) & (X <= COMBINED_PLATEAU_END)
+    h[in_plateau] = COMBINED_N_STAIRS * COMBINED_STAIR_H / COMBINED_Z_SCALE
+
+    # --- 下り階段区間 (14〜16.5m) ---
+    in_stairs_down = (X > COMBINED_PLATEAU_END) & (X <= COMBINED_STAIR_DOWN_END)
+    stair_rel_down = X - COMBINED_PLATEAU_END
+    stair_idx_down = np.clip(np.floor(stair_rel_down / COMBINED_STAIR_DEPTH).astype(int),
+                             0, COMBINED_N_STAIRS - 1)
+    stair_h_norm_down = (COMBINED_N_STAIRS - stair_idx_down) * COMBINED_STAIR_H / COMBINED_Z_SCALE
+    h[in_stairs_down] = stair_h_norm_down[in_stairs_down]
+
+    # --- 下り後の平坦 (16.5m〜) ---
+    # h = 0 (初期値のまま)
 
     return h.astype(np.float32)
 
@@ -387,7 +403,7 @@ def build_combined_xml() -> str:
         f'          contype="1" conaffinity="1" material="mat_floor"/>\n'
         f'    <camera name="track" pos="5 -12 5" xyaxes="1 0 0 0 0.32 0.95" fovy="55"/>\n'
     )
-    goal_z = COMBINED_N_STAIRS * COMBINED_STAIR_H
+    goal_z = 0.0  # 下り階段後は地面レベル
     return (
         _header_xml(extra_assets=hfield_asset)
         + "\n  <worldbody>"
@@ -777,7 +793,7 @@ class BlockyWalkerEnv(gym.Env):
         # ゴールをリセット
         if self._combined:
             self._goal_x = COMBINED_GOAL_X
-            goal_z = COMBINED_N_STAIRS * COMBINED_STAIR_H
+            goal_z = 0.0  # 下り階段後は地面レベル
         elif self._stairs:
             self._goal_x = STAIRS_GOAL_X
             goal_z = STAIR_TOP_Z
